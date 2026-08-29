@@ -1,6 +1,8 @@
 use axum::{Json, Router, routing::get};
 use serde::{Deserialize, Serialize};
 
+mod crypto;
+
 #[derive(Deserialize, Serialize)]
 struct ClassicAnswer {
     answer: String
