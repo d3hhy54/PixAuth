@@ -5,13 +5,13 @@ mod crypto;
 
 #[derive(Deserialize, Serialize)]
 struct ClassicAnswer {
-    answer: String
+    answer: String,
 }
 
-async fn handler() -> Json<ClassicAnswer>{
-    Json(
-        ClassicAnswer { answer: "Hello world!".to_string() }
-    )
+async fn handler() -> Json<ClassicAnswer> {
+    Json(ClassicAnswer {
+        answer: "Hello world!".to_string(),
+    })
 }
 
 #[tokio::main]
