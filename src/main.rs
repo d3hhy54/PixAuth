@@ -11,9 +11,9 @@ struct ClassicAnswer {
 }
 
 async fn handler() -> Json<ClassicAnswer> {
-    Json(
-        ClassicAnswer { answer: "Hello world!".to_string() }
-    )
+    Json(ClassicAnswer {
+        answer: "Hello world!".to_string(),
+    })
 }
 
 #[tokio::main]

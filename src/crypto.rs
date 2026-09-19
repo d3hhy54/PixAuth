@@ -2,7 +2,7 @@ use argon2::PasswordVerifier;
 use sha2::digest::Output;
 use sha2::{Digest, Sha512};
 
-use argon2::{ Algorithm, Argon2, Params, Version, password_hash::PasswordHasher, PasswordHash };
+use argon2::{Algorithm, Argon2, Params, PasswordHash, Version, password_hash::PasswordHasher};
 
 use dotenvy;
 use envy;
@@ -21,7 +21,7 @@ struct ArgonConfig {
     p_cost: u32,
     #[allow(unused)]
     trash_argon2: String,
-    pepper: String
+    pepper: String,
 }
 
 fn split_by_parity(arr: &[u8; 256]) -> ([u8; 128], [u8; 128]) {
@@ -44,44 +44,31 @@ pub struct CryptoEngine {
     #[allow(unused)]
     argon2: Argon2<'static>,
     #[allow(unused)]
-    config: ArgonConfig
+    config: ArgonConfig,
 }
 
 impl CryptoEngine {
     pub fn init() -> Result<Self> {
         dotenvy::dotenv().ok();
 
-        let config = envy::from_env::<ArgonConfig>()
-            .expect("Missing or invalid args in .env");
+        let config = envy::from_env::<ArgonConfig>().expect("Missing or invalid args in .env");
 
         let pepper_bytes = config.pepper.clone().into_bytes();
         let leaked_pepper: &'static [u8] = Box::leak(pepper_bytes.into_boxed_slice());
 
-        let params = Params::new(
-            config.m_cost,
-            config.t_cost,
-            config.p_cost,
-            None
-        )?;
+        let params = Params::new(config.m_cost, config.t_cost, config.p_cost, None)?;
 
-        let argon2 = Argon2::new_with_secret(
-            leaked_pepper,
-            Algorithm::Argon2id,
-            Version::V0x13,
-            params)?;
+        let argon2 =
+            Argon2::new_with_secret(leaked_pepper, Algorithm::Argon2id, Version::V0x13, params)?;
 
-        Ok(
-            Self {
-                argon2,
-                config
-            }
-        )
+        Ok(Self { argon2, config })
     }
 
     #[allow(unused)]
     fn digest_argon2id(&self, arr: &[u8; 128]) -> Result<String, argon2::password_hash::Error> {
         let raw_salt = argon2::password_hash::generate_salt();
-        let password_hash = self.argon2
+        let password_hash = self
+            .argon2
             .hash_password_with_salt(arr, &raw_salt)?
             .to_string();
 
@@ -89,11 +76,7 @@ impl CryptoEngine {
     }
 
     #[allow(unused)]
-    fn verify_password(
-        &self,
-        arr: &[u8; 128],
-        hash: &str
-    ) -> Result<bool> {
+    fn verify_password(&self, arr: &[u8; 128], hash: &str) -> Result<bool> {
         let parsed_hash = PasswordHash::new(hash)?;
         Ok(self.argon2.verify_password(arr, &parsed_hash).is_ok())
     }
@@ -116,10 +99,10 @@ mod tests {
         static ENGINE: OnceLock<CryptoEngine> = OnceLock::new();
         ENGINE.get_or_init(|| {
             unsafe {
-            std::env::set_var("PEPPER", "super_secret_test_pepper_that_is_long_enough");
-            std::env::set_var("ARGON2_M_COST", "4096"); // Маленькие значения, чтобы тесты
-            std::env::set_var("ARGON2_T_COST", "2");    // прогонялись мгновенно
-            std::env::set_var("ARGON2_P_COST", "1");
+                std::env::set_var("PEPPER", "super_secret_test_pepper_that_is_long_enough");
+                std::env::set_var("ARGON2_M_COST", "4096"); // Маленькие значения, чтобы тесты
+                std::env::set_var("ARGON2_T_COST", "2"); // прогонялись мгновенно
+                std::env::set_var("ARGON2_P_COST", "1");
             }
             CryptoEngine::init().expect("Failed to initialize test CryptoEngine")
         })
@@ -138,13 +121,15 @@ mod tests {
         let password = make_test_arr(1);
 
         // Хешируем
-        let hash = engine.digest_argon2id(&password)
+        let hash = engine
+            .digest_argon2id(&password)
             .expect("Failed to hash password");
 
         assert!(!hash.is_empty(), "Hash should not be empty");
 
         // Проверяем валидный пароль
-        let is_valid = engine.verify_password(&password, &hash)
+        let is_valid = engine
+            .verify_password(&password, &hash)
             .expect("Failed to verify password");
 
         assert!(is_valid, "Password verification should succeed");
@@ -173,7 +158,10 @@ mod tests {
         // Проверяем, что ломается парсинг некорректного хеша
         let result = engine.verify_password(&password, invalid_hash);
 
-        assert!(result.is_err(), "Should return an error for mangled hash format");
+        assert!(
+            result.is_err(),
+            "Should return an error for mangled hash format"
+        );
     }
 
     #[test]
@@ -189,7 +177,6 @@ mod tests {
 
         assert_eq!(split_by_parity(&data), (expected_even, expected_odd));
     }
-
 
     #[test]
     fn test_digest_sha512_zeros() {

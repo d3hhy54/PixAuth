@@ -1,0 +1,31 @@
+image: rust:latest
+
+variables:
+  CARGO_INCREMENTAL: "0"
+
+cache:
+  key: "$CI_COMMIT_REF_SLUG"
+  paths:
+    - .cargo/bin/
+    - .cargo/registry/index/
+    - .cargo/registry/cache/
+    - .cargo/git/db/
+    - target/
+
+before_script:
+  - export CARGO_HOME="$(pwd)/.cargo"
+
+stages:
+  - lint
+  - test
+
+clippy:
+  stage: lint
+  script:
+    - rustup component add clippy
+    - cargo clippy -- -D warnings
+
+test:
+  stage: test
+  script:
+    - cargo test --workspace
