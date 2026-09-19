@@ -4,9 +4,6 @@ use sha2::{Digest, Sha512};
 
 use argon2::{Algorithm, Argon2, Params, PasswordHash, Version, password_hash::PasswordHasher};
 
-use dotenvy;
-use envy;
-
 use serde::Deserialize;
 
 use anyhow::Result;
