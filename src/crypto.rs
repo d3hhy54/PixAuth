@@ -100,6 +100,7 @@ mod tests {
                 std::env::set_var("ARGON2_M_COST", "4096"); // Маленькие значения, чтобы тесты
                 std::env::set_var("ARGON2_T_COST", "2"); // прогонялись мгновенно
                 std::env::set_var("ARGON2_P_COST", "1");
+                std::env::set_var("TRASH_ARGON2", "$argon2id$v=19$m=65536,t=3,p=1$c29tZXJhbmRvbXNhbHQ$vR4S/zG/q+jP2vI35Z1NfA3k9dJxl6QzU6jX8jL5Zok");
             }
             CryptoEngine::init().expect("Failed to initialize test CryptoEngine")
         })
