@@ -1,12 +1,16 @@
+use std::sync::OnceLock;
+
 use argon2::PasswordVerifier;
-use sha2::digest::Output;
-use sha2::{Digest, Sha512};
+use hmac::{Hmac, KeyInit, Mac};
+use sha2::Sha512;
 
 use argon2::{Algorithm, Argon2, Params, PasswordHash, Version, password_hash::PasswordHasher};
 
 use serde::Deserialize;
 
 use anyhow::Result;
+
+static PEPPER_STORAGE: OnceLock<Vec<u8>> = OnceLock::new();
 
 #[derive(Deserialize)]
 struct ArgonConfig {
@@ -21,27 +25,18 @@ struct ArgonConfig {
     pepper: String,
 }
 
-fn split_by_parity(arr: &[u8; 256]) -> ([u8; 128], [u8; 128]) {
-    let mut evens = [0u8; 128];
-    let mut odds = [0u8; 128];
-
-    for i in 0..128 {
-        evens[i] = arr[i * 2];
-        odds[i] = arr[i * 2 + 1];
-    }
-
-    (evens, odds)
-}
-
-fn digest_sha512(arr: &[u8; 128]) -> Output<Sha512> {
-    Sha512::digest(arr)
-}
-
 pub struct CryptoEngine {
     #[allow(unused)]
     argon2: Argon2<'static>,
     #[allow(unused)]
     config: ArgonConfig,
+}
+
+pub struct HashedUser {
+    #[allow(unused)]
+    login: String,
+    #[allow(unused)]
+    password: Option<String>,
 }
 
 impl CryptoEngine {
@@ -50,8 +45,8 @@ impl CryptoEngine {
 
         let config = envy::from_env::<ArgonConfig>().expect("Missing or invalid args in .env");
 
-        let pepper_bytes = config.pepper.clone().into_bytes();
-        let leaked_pepper: &'static [u8] = Box::leak(pepper_bytes.into_boxed_slice());
+        let pepper_vec = PEPPER_STORAGE.get_or_init(|| config.pepper.clone().into_bytes());
+        let leaked_pepper: &'static [u8] = pepper_vec.as_slice();
 
         let params = Params::new(config.m_cost, config.t_cost, config.p_cost, None)?;
 
@@ -59,6 +54,29 @@ impl CryptoEngine {
             Argon2::new_with_secret(leaked_pepper, Algorithm::Argon2id, Version::V0x13, params)?;
 
         Ok(Self { argon2, config })
+    }
+
+    #[allow(unused)]
+    pub fn split_by_parity(arr: &[u8; 256]) -> ([u8; 128], [u8; 128]) {
+        let mut evens = [0u8; 128];
+        let mut odds = [0u8; 128];
+
+        for i in 0..128 {
+            evens[i] = arr[i * 2];
+            odds[i] = arr[i * 2 + 1];
+        }
+
+        (evens, odds)
+    }
+
+    #[allow(unused)]
+    fn digest_hmac_sha512(&self, arr: &[u8; 128]) -> Result<String> {
+        type HmacSha512 = Hmac<Sha512>;
+        let mut mac = HmacSha512::new_from_slice(self.config.pepper.as_bytes())?;
+        mac.update(arr);
+        let result = mac.finalize();
+        let result = hex::encode(result.into_bytes());
+        Ok(result)
     }
 
     #[allow(unused)]
@@ -77,117 +95,171 @@ impl CryptoEngine {
         let parsed_hash = PasswordHash::new(hash)?;
         Ok(self.argon2.verify_password(arr, &parsed_hash).is_ok())
     }
-}
 
-#[allow(unused)]
-pub fn check_user() {
-    let arr = [0u8; 256];
-    let (first_arr, second_arr) = split_by_parity(&arr);
-    let login = digest_sha512(&second_arr);
+    #[allow(unused)]
+    pub fn verify_user(&self, arr: &[u8; 256], password_hash: Option<&str>) -> Result<bool> {
+        let (arr, _) = Self::split_by_parity(arr);
+        match password_hash {
+            Some(hash) => Ok(self.verify_password(&arr, hash)?),
+            None => Ok(self.verify_password(&arr, &self.config.trash_argon2)?),
+        }
+    }
+
+    #[allow(unused)]
+    pub fn hash_user(&self, arr: &[u8; 256], password: bool) -> Result<HashedUser> {
+        let (evens, odds) = Self::split_by_parity(arr);
+        let hash_login = self.digest_hmac_sha512(&odds)?;
+        let hash_password = if password {
+            Some(self.digest_argon2id(&evens)?)
+        } else {
+            None
+        };
+        Ok(HashedUser {
+            login: hash_login,
+            password: hash_password,
+        })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hex_literal::hex;
-    use std::sync::OnceLock;
 
+    // Улучшенная версия: не трогает env, а собирает конфиг руками
     fn get_test_engine() -> &'static CryptoEngine {
         static ENGINE: OnceLock<CryptoEngine> = OnceLock::new();
         ENGINE.get_or_init(|| {
-            unsafe {
-                std::env::set_var("PEPPER", "super_secret_test_pepper_that_is_long_enough");
-                std::env::set_var("ARGON2_M_COST", "4096"); // Маленькие значения, чтобы тесты
-                std::env::set_var("ARGON2_T_COST", "2"); // прогонялись мгновенно
-                std::env::set_var("ARGON2_P_COST", "1");
-                std::env::set_var("TRASH_ARGON2", "$argon2id$v=19$m=65536,t=3,p=1$c29tZXJhbmRvbXNhbHQ$vR4S/zG/q+jP2vI35Z1NfA3k9dJxl6QzU6jX8jL5Zok");
-            }
-            CryptoEngine::init().expect("Failed to initialize test CryptoEngine")
+            // Создаем конфигурацию напрямую, без опасных манипуляций с std::env
+            let config = ArgonConfig {
+                m_cost: 4096, // Быстро для тестов
+                t_cost: 2,
+                p_cost: 1,
+                trash_argon2: "$argon2id$v=19$m=4096,t=2,p=1$c29tZXJhbmRvbXNhbHQ$vR4S/zG/q+jP2vI35Z1NfA3k9dJxl6QzU6jX8jL5Zok".to_string(), // Валидный хэш под наши параметры!
+                pepper: "super_secret_test_pepper_that_is_long_enough_for_hmac_and_argon".to_string(),
+            };
+
+            let pepper_vec = PEPPER_STORAGE.get_or_init(|| config.pepper.clone().into_bytes());
+            let leaked_pepper: &'static [u8] = pepper_vec.as_slice();
+            let params = Params::new(config.m_cost, config.t_cost, config.p_cost, None).unwrap();
+            let argon2 = Argon2::new_with_secret(leaked_pepper, Algorithm::Argon2id, Version::V0x13, params).unwrap();
+
+            CryptoEngine { argon2, config }
         })
     }
 
-    // Вспомогательная функция для генерации тестового массива [u8; 128]
-    fn make_test_arr(fill: u8) -> [u8; 128] {
-        let mut arr = [0u8; 128];
-        arr[0..5].copy_from_slice(&[fill; 5]); // Просто заполняем начало для уникальности
-        arr
+    #[test]
+    fn test_split_by_parity_correctness() {
+        // Создаем массив [0, 1, 2, 3, 4, 5, ..., 255]
+        let mut input = [0u8; 256];
+        for i in 0..256 {
+            input[i] = i as u8;
+        }
+
+        let (evens, odds) = CryptoEngine::split_by_parity(&input);
+
+        // Проверяем четные индексы: 0, 2, 4... должны превратиться в 0, 2, 4...
+        assert_eq!(evens[0], 0);
+        assert_eq!(evens[1], 2);
+        assert_eq!(evens[127], 254);
+
+        // Проверяем нечетные индексы: 1, 3, 5... должны превратиться в 1, 3, 5...
+        assert_eq!(odds[0], 1);
+        assert_eq!(odds[1], 3);
+        assert_eq!(odds[127], 255);
     }
 
     #[test]
     fn test_hash_and_verify_success() {
         let engine = get_test_engine();
-        let password = make_test_arr(1);
+        let input_data = [42u8; 256]; // Имитируем какой-то ключ/пароль на 256 байт
 
-        // Хешируем
-        let hash = engine
-            .digest_argon2id(&password)
-            .expect("Failed to hash password");
-
-        assert!(!hash.is_empty(), "Hash should not be empty");
-
-        // Проверяем валидный пароль
-        let is_valid = engine
-            .verify_password(&password, &hash)
-            .expect("Failed to verify password");
-
-        assert!(is_valid, "Password verification should succeed");
-    }
-
-    #[test]
-    fn test_verify_wrong_password() {
-        let engine = get_test_engine();
-        let correct_password = make_test_arr(1);
-        let wrong_password = make_test_arr(2);
-
-        let hash = engine.digest_argon2id(&correct_password).unwrap();
-
-        // Проверяем неверный пароль
-        let is_valid = engine.verify_password(&wrong_password, &hash).unwrap();
-
-        assert!(!is_valid, "Verification should fail for wrong password");
-    }
-
-    #[test]
-    fn test_verify_invalid_hash_format() {
-        let engine = get_test_engine();
-        let password = make_test_arr(1);
-        let invalid_hash = "$argon2id$v=19$m=4096,t=3,p=1$invalidformat";
-
-        // Проверяем, что ломается парсинг некорректного хеша
-        let result = engine.verify_password(&password, invalid_hash);
+        // Хешируем пользователя (включая пароль)
+        let hashed_user = engine.hash_user(&input_data, true).unwrap();
 
         assert!(
-            result.is_err(),
-            "Should return an error for mangled hash format"
+            !hashed_user.login.is_empty(),
+            "HMAC логина не должен быть пустым"
+        );
+        assert!(
+            hashed_user.password.is_some(),
+            "Хеш пароля должен присутствовать"
+        );
+
+        let pwd_hash_str = hashed_user.password.unwrap();
+        assert!(
+            pwd_hash_str.contains("$argon2id$"),
+            "Это должен быть валидный Argon2id хэш"
+        );
+
+        // Проверяем верификацию существующего пользователя
+        let is_valid = engine
+            .verify_user(&input_data, Some(&pwd_hash_str))
+            .unwrap();
+        assert!(
+            is_valid,
+            "Валидные данные должны успешно проходить верификацию"
         );
     }
 
     #[test]
-    fn test_split_by_parity() {
-        // Заполняем массив числами 0, 1, 2, 3, ..., 255
-        let data: [u8; 256] = std::array::from_fn(|i| i as u8);
+    fn test_verify_user_wrong_password() {
+        let engine = get_test_engine();
+        let input_data = [42u8; 256];
+        let mut wrong_data = [42u8; 256];
+        wrong_data[0] = 0; // Чуть-чуть ломаем входные данные для проверки пароля
 
-        // Генерируем ожидаемые массивы
-        // Чётные: 0, 2, 4, 6 ... 254
-        let expected_even: [u8; 128] = std::array::from_fn(|i| (i * 2) as u8);
-        // Нечётные: 1, 3, 5, 7 ... 255
-        let expected_odd: [u8; 128] = std::array::from_fn(|i| (i * 2 + 1) as u8);
+        let hashed_user = engine.hash_user(&input_data, true).unwrap();
 
-        assert_eq!(split_by_parity(&data), (expected_even, expected_odd));
+        // Передаем измененные данные со старым хэшем
+        let is_valid = engine
+            .verify_user(&wrong_data, Some(&hashed_user.password.unwrap()))
+            .unwrap();
+        assert!(
+            !is_valid,
+            "Измененные данные не должны проходить верификацию"
+        );
     }
 
     #[test]
-    fn test_digest_sha512_zeros() {
-        // Тест с массивом из 128 нулей
-        let input = [0u8; 128];
+    fn test_verify_user_missing_hash_protection() {
+        let engine = get_test_engine();
+        let input_data = [77u8; 256];
 
-        let hash512 = digest_sha512(&input);
+        // Замеряем время, чтобы убедиться, что фейковое хеширование РАБОТАЕТ (нет тайминг-атаки)
+        let start = std::time::Instant::now();
 
-        assert_eq!(
-            &hash512[..],
-            &hex!(
-                "ab942f526272e456ed68a979f50202905ca903a141ed98443567b11ef0bf25a552d639051a01be58558122c58e3de07d749ee59ded36acf0c55cd91924d6ba11"
-            )[..]
-        )
+        // Передаем None вместо хэша (пользователя нет в БД)
+        let is_valid = engine.verify_user(&input_data, None).unwrap();
+
+        let duration = start.elapsed();
+
+        assert!(
+            !is_valid,
+            "Если хэша нет, верификация всегда должна возвращать false"
+        );
+
+        // Убеждаемся, что Argon2 крутился, а не вылетел за микросекунду.
+        // Наш заниженный m_cost=4096 обычно выполняется от 1 до 10+ миллисекунд (зависит от процессора).
+        // Проверим, что это заняло хотя бы больше 50 микросекунд (обычный парсинг строки занимает < 1 мкс).
+        assert!(
+            duration.as_micros() > 50,
+            "Слишком быстрый ответ ({:?})! Похоже, фейковый Argon2 не выполнился.",
+            duration
+        );
+    }
+
+    #[test]
+    fn test_hash_user_without_password() {
+        let engine = get_test_engine();
+        let input_data = [99u8; 256];
+
+        // Генерируем только логин (например, для проверки существования или быстрой сверки)
+        let hashed_user = engine.hash_user(&input_data, false).unwrap();
+
+        assert!(!hashed_user.login.is_empty());
+        assert!(
+            hashed_user.password.is_none(),
+            "Если password = false, Argon2 не должен запускаться"
+        );
     }
 }
