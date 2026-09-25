@@ -15,3 +15,4 @@ envy = "0.4.2"
 anyhow = "1.0.104"
 hmac = "0.13.0"
 hex = "0.4.3"
+sqlx = { version = "0.9.0", features = ["runtime-tokio", "tls-native-tls", "postgres", "sqlite", "macros"] }

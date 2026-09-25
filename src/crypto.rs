@@ -1,3 +1,4 @@
+#![allow(dead_code, unused_variables)]
 use std::sync::OnceLock;
 
 use argon2::PasswordVerifier;
@@ -20,29 +21,25 @@ struct ArgonConfig {
     t_cost: u32,
     #[serde(rename = "argon2_p_cost")]
     p_cost: u32,
-    #[allow(unused)]
+
     trash_argon2: String,
     pepper: String,
 }
 
 pub struct CryptoEngine {
-    #[allow(unused)]
     argon2: Argon2<'static>,
-    #[allow(unused)]
+
     config: ArgonConfig,
 }
 
 pub struct HashedUser {
-    #[allow(unused)]
     login: String,
-    #[allow(unused)]
+
     password: Option<String>,
 }
 
 impl CryptoEngine {
     pub fn init() -> Result<Self> {
-        dotenvy::dotenv().ok();
-
         let config = envy::from_env::<ArgonConfig>().expect("Missing or invalid args in .env");
 
         let pepper_vec = PEPPER_STORAGE.get_or_init(|| config.pepper.clone().into_bytes());
@@ -56,7 +53,6 @@ impl CryptoEngine {
         Ok(Self { argon2, config })
     }
 
-    #[allow(unused)]
     pub fn split_by_parity(arr: &[u8; 256]) -> ([u8; 128], [u8; 128]) {
         let mut evens = [0u8; 128];
         let mut odds = [0u8; 128];
@@ -69,7 +65,6 @@ impl CryptoEngine {
         (evens, odds)
     }
 
-    #[allow(unused)]
     fn digest_hmac_sha512(&self, arr: &[u8; 128]) -> Result<String> {
         type HmacSha512 = Hmac<Sha512>;
         let mut mac = HmacSha512::new_from_slice(self.config.pepper.as_bytes())?;
@@ -79,7 +74,6 @@ impl CryptoEngine {
         Ok(result)
     }
 
-    #[allow(unused)]
     fn digest_argon2id(&self, arr: &[u8; 128]) -> Result<String, argon2::password_hash::Error> {
         let raw_salt = argon2::password_hash::generate_salt();
         let password_hash = self
@@ -90,13 +84,11 @@ impl CryptoEngine {
         Ok(password_hash)
     }
 
-    #[allow(unused)]
     fn verify_password(&self, arr: &[u8; 128], hash: &str) -> Result<bool> {
         let parsed_hash = PasswordHash::new(hash)?;
         Ok(self.argon2.verify_password(arr, &parsed_hash).is_ok())
     }
 
-    #[allow(unused)]
     pub fn verify_user(&self, arr: &[u8; 256], password_hash: Option<&str>) -> Result<bool> {
         let (arr, _) = Self::split_by_parity(arr);
         match password_hash {
@@ -105,7 +97,6 @@ impl CryptoEngine {
         }
     }
 
-    #[allow(unused)]
     pub fn hash_user(&self, arr: &[u8; 256], password: bool) -> Result<HashedUser> {
         let (evens, odds) = Self::split_by_parity(arr);
         let hash_login = self.digest_hmac_sha512(&odds)?;
