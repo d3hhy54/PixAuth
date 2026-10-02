@@ -53,7 +53,13 @@ impl CryptoEngine {
         Ok(Self { argon2, config })
     }
 
-    pub fn split_by_parity(arr: &[u8; 256]) -> ([u8; 128], [u8; 128]) {
+    fn pack_nibbles(arr: &[u8]) -> Vec<u8> {
+        arr.chunks_exact(2)
+            .map(|pair| (pair[0] << 4) | (pair[1] & 0x0f))
+            .collect()
+    }
+
+    fn split_by_parity(arr: &[u8; 256]) -> ([u8; 128], [u8; 128]) {
         let mut evens = [0u8; 128];
         let mut odds = [0u8; 128];
 
