@@ -83,20 +83,6 @@ impl CryptoEngine {
         Ok(seed)
     }
 
-    // fn split_array(&self, arr: &mut [u8; 256]) -> Result<(Vec<u8>, Vec<u8>)> {
-    //     let pack_arr = Self::pack_nibbles(arr);
-    //     let
-
-    //     let mut rng = ChaChaRng::from_seed(seed);
-
-    //     arr.shuffle(&mut rng);
-
-    //     let login_arr = Self::pack_nibbles(&arr[0..128]);
-    //     let password_arr = Self::pack_nibbles(&arr[128..256]);
-
-    //     Ok((login_arr, password_arr))
-    // }
-
     fn split_by_parity(arr: &[u8; 256]) -> ([u8; 128], [u8; 128]) {
         let mut evens = [0u8; 128];
         let mut odds = [0u8; 128];
@@ -159,6 +145,43 @@ impl CryptoEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_successful_packing() {
+        // Входной массив из 4 элементов (I = 4)
+        let input: [u8; 4] = [0x0A, 0x0B, 0x05, 0x0C];
+
+        // Ожидаем на выходе 2 элемента (O = 2), так как 4 == 2 * 2
+        let result = CryptoEngine::pack_nibbles::<4, 2>(&input);
+
+        assert!(result.is_ok());
+        // 0x0A << 4 | 0x0B -> 0xAB
+        // 0x05 << 4 | 0x0C -> 0x5C
+        assert_eq!(result.unwrap(), [0xAB, 0x5C]);
+    }
+
+    #[test]
+    fn test_invalid_nibble_value() {
+        // Число 16 не влезает в 4 бита (полубайт)
+        let input: [u8; 4] = [0x0A, 16, 0x05, 0x0C];
+
+        let result = CryptoEngine::pack_nibbles::<4, 2>(&input);
+
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err(),
+            "Number must be from 0 to 15".to_string()
+        );
+    }
+
+    #[test]
+    fn test_zeros_and_max_values() {
+        let input: [u8; 2] = [0, 15]; // Граничные значения
+        let result = CryptoEngine::pack_nibbles::<2, 1>(&input);
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), [0x0F]);
+    }
 
     // Улучшенная версия: не трогает env, а собирает конфиг руками
     fn get_test_engine() -> &'static CryptoEngine {
