@@ -56,10 +56,23 @@ impl CryptoEngine {
         Ok(Self { argon2, config })
     }
 
-    fn pack_nibbles(arr: &[u8]) -> Vec<u8> {
-        arr.chunks_exact(2)
-            .map(|pair| (pair[0] << 4) | (pair[1] & 0x0f))
-            .collect()
+    fn pack_nibbles<const I: usize, const O: usize>(arr: &[u8; I]) -> Result<[u8; O], String> {
+        const {
+            assert!(
+                I == O * 2,
+                "Input array must be twice as many elements as output array"
+            );
+        }
+        let mut packed = [0u8; O];
+        for (i, pair) in arr.chunks_exact(2).enumerate() {
+            let first = pair[0];
+            let second = pair[1];
+            if first > 15 || second > 15 {
+                return Err("Number must be from 0 to 15".to_string());
+            }
+            packed[i] = (first << 4) | (second & 0x0F);
+        }
+        Ok(packed)
     }
 
     fn digest_seed(&self, arr: &[u8]) -> Result<[u8; 32]> {
@@ -69,6 +82,20 @@ impl CryptoEngine {
         let seed = mac.finalize().into_bytes().into();
         Ok(seed)
     }
+
+    // fn split_array(&self, arr: &mut [u8; 256]) -> Result<(Vec<u8>, Vec<u8>)> {
+    //     let pack_arr = Self::pack_nibbles(arr);
+    //     let
+
+    //     let mut rng = ChaChaRng::from_seed(seed);
+
+    //     arr.shuffle(&mut rng);
+
+    //     let login_arr = Self::pack_nibbles(&arr[0..128]);
+    //     let password_arr = Self::pack_nibbles(&arr[128..256]);
+
+    //     Ok((login_arr, password_arr))
+    // }
 
     fn split_by_parity(arr: &[u8; 256]) -> ([u8; 128], [u8; 128]) {
         let mut evens = [0u8; 128];
