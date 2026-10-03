@@ -3,9 +3,12 @@ use std::sync::OnceLock;
 
 use argon2::PasswordVerifier;
 use hmac::{Hmac, KeyInit, Mac};
-use sha2::Sha512;
+use sha2::{Sha256, Sha512};
 
 use argon2::{Algorithm, Argon2, Params, PasswordHash, Version, password_hash::PasswordHasher};
+
+use rand_chacha::ChaCha12Rng as ChaChaRng;
+use rand_chacha::rand_core::SeedableRng;
 
 use serde::Deserialize;
 
@@ -57,6 +60,14 @@ impl CryptoEngine {
         arr.chunks_exact(2)
             .map(|pair| (pair[0] << 4) | (pair[1] & 0x0f))
             .collect()
+    }
+
+    fn digest_seed(&self, arr: &[u8]) -> Result<[u8; 32]> {
+        type HmacSha256 = Hmac<Sha256>;
+        let mut mac = HmacSha256::new_from_slice(self.config.pepper.as_bytes())?;
+        mac.update(arr.iter().as_slice());
+        let seed = mac.finalize().into_bytes().into();
+        Ok(seed)
     }
 
     fn split_by_parity(arr: &[u8; 256]) -> ([u8; 128], [u8; 128]) {
