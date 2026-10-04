@@ -7,12 +7,13 @@ use sha2::{Sha256, Sha512};
 
 use argon2::{Algorithm, Argon2, Params, PasswordHash, Version, password_hash::PasswordHasher};
 
+use rand::seq::SliceRandom;
 use rand_chacha::ChaCha12Rng as ChaChaRng;
 use rand_chacha::rand_core::SeedableRng;
 
 use serde::Deserialize;
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 
 static PEPPER_STORAGE: OnceLock<Vec<u8>> = OnceLock::new();
 
@@ -81,6 +82,21 @@ impl CryptoEngine {
         mac.update(arr.iter().as_slice());
         let seed = mac.finalize().into_bytes().into();
         Ok(seed)
+    }
+
+    fn split_array(&self, arr: &mut [u8; 256]) -> Result<([u8; 64], [u8; 64])> {
+        let pack_arr: [u8; 128] = Self::pack_nibbles(arr).map_err(|e| anyhow!(e))?;
+
+        let mut rng = ChaChaRng::from_seed(self.digest_seed(&pack_arr)?);
+        arr.shuffle(&mut rng);
+
+        let first_slice: &[u8; 128] = arr[0..128].try_into()?;
+        let first_packed: [u8; 64] = Self::pack_nibbles(first_slice).map_err(|e| anyhow!(e))?;
+
+        let second_slice: &[u8; 128] = arr[128..256].try_into()?;
+        let second_packed: [u8; 64] = Self::pack_nibbles(second_slice).map_err(|e| anyhow!(e))?;
+
+        Ok((first_packed, second_packed))
     }
 
     fn split_by_parity(arr: &[u8; 256]) -> ([u8; 128], [u8; 128]) {
