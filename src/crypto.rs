@@ -103,19 +103,7 @@ impl CryptoEngine {
         Ok((first_packed, second_packed))
     }
 
-    fn split_by_parity(arr: &[u8; 256]) -> ([u8; 128], [u8; 128]) {
-        let mut evens = [0u8; 128];
-        let mut odds = [0u8; 128];
-
-        for i in 0..128 {
-            evens[i] = arr[i * 2];
-            odds[i] = arr[i * 2 + 1];
-        }
-
-        (evens, odds)
-    }
-
-    fn digest_hmac_sha512(&self, arr: &[u8; 128]) -> Result<String> {
+    fn digest_hmac_sha512(&self, arr: &[u8; 64]) -> Result<String> {
         type HmacSha512 = Hmac<Sha512>;
         let mut mac = HmacSha512::new_from_slice(self.config.pepper.as_bytes())?;
         mac.update(arr);
@@ -124,7 +112,7 @@ impl CryptoEngine {
         Ok(result)
     }
 
-    fn digest_argon2id(&self, arr: &[u8; 128]) -> Result<String, argon2::password_hash::Error> {
+    fn digest_argon2id(&self, arr: &[u8; 64]) -> Result<String, argon2::password_hash::Error> {
         let raw_salt = argon2::password_hash::generate_salt();
         let password_hash = self
             .argon2
@@ -134,24 +122,24 @@ impl CryptoEngine {
         Ok(password_hash)
     }
 
-    fn verify_password(&self, arr: &[u8; 128], hash: &str) -> Result<bool> {
+    fn verify_password(&self, arr: &[u8; 64], hash: &str) -> Result<bool> {
         let parsed_hash = PasswordHash::new(hash)?;
         Ok(self.argon2.verify_password(arr, &parsed_hash).is_ok())
     }
 
-    pub fn verify_user(&self, arr: &[u8; 256], password_hash: Option<&str>) -> Result<bool> {
-        let (arr, _) = Self::split_by_parity(arr);
+    pub fn verify_user(&self, arr: &mut [u8; 256], password_hash: Option<&str>) -> Result<bool> {
+        let (arr, _) = self.split_array(arr)?;
         match password_hash {
             Some(hash) => Ok(self.verify_password(&arr, hash)?),
             None => Ok(self.verify_password(&arr, &self.config.trash_argon2)?),
         }
     }
 
-    pub fn hash_user(&self, arr: &[u8; 256], password: bool) -> Result<HashedUser> {
-        let (evens, odds) = Self::split_by_parity(arr);
-        let hash_login = self.digest_hmac_sha512(&odds)?;
+    pub fn hash_user(&self, arr: &mut [u8; 256], password: bool) -> Result<HashedUser> {
+        let (first, second) = self.split_array(arr)?;
+        let hash_login = self.digest_hmac_sha512(&first)?;
         let hash_password = if password {
-            Some(self.digest_argon2id(&evens)?)
+            Some(self.digest_argon2id(&second)?)
         } else {
             None
         };
@@ -226,33 +214,12 @@ mod tests {
     }
 
     #[test]
-    fn test_split_by_parity_correctness() {
-        // Создаем массив [0, 1, 2, 3, 4, 5, ..., 255]
-        let mut input = [0u8; 256];
-        for i in 0..256 {
-            input[i] = i as u8;
-        }
-
-        let (evens, odds) = CryptoEngine::split_by_parity(&input);
-
-        // Проверяем четные индексы: 0, 2, 4... должны превратиться в 0, 2, 4...
-        assert_eq!(evens[0], 0);
-        assert_eq!(evens[1], 2);
-        assert_eq!(evens[127], 254);
-
-        // Проверяем нечетные индексы: 1, 3, 5... должны превратиться в 1, 3, 5...
-        assert_eq!(odds[0], 1);
-        assert_eq!(odds[1], 3);
-        assert_eq!(odds[127], 255);
-    }
-
-    #[test]
     fn test_hash_and_verify_success() {
         let engine = get_test_engine();
-        let input_data = [42u8; 256]; // Имитируем какой-то ключ/пароль на 256 байт
+        let mut input_data = [4u8; 256]; // Имитируем какой-то ключ/пароль на 256 байт
 
         // Хешируем пользователя (включая пароль)
-        let hashed_user = engine.hash_user(&input_data, true).unwrap();
+        let hashed_user = engine.hash_user(&mut input_data, true).unwrap();
 
         assert!(
             !hashed_user.login.is_empty(),
@@ -271,7 +238,7 @@ mod tests {
 
         // Проверяем верификацию существующего пользователя
         let is_valid = engine
-            .verify_user(&input_data, Some(&pwd_hash_str))
+            .verify_user(&mut input_data, Some(&pwd_hash_str))
             .unwrap();
         assert!(
             is_valid,
@@ -282,15 +249,15 @@ mod tests {
     #[test]
     fn test_verify_user_wrong_password() {
         let engine = get_test_engine();
-        let input_data = [42u8; 256];
-        let mut wrong_data = [42u8; 256];
+        let mut input_data = [15u8; 256];
+        let mut wrong_data = [15u8; 256];
         wrong_data[0] = 0; // Чуть-чуть ломаем входные данные для проверки пароля
 
-        let hashed_user = engine.hash_user(&input_data, true).unwrap();
+        let hashed_user = engine.hash_user(&mut input_data, true).unwrap();
 
         // Передаем измененные данные со старым хэшем
         let is_valid = engine
-            .verify_user(&wrong_data, Some(&hashed_user.password.unwrap()))
+            .verify_user(&mut wrong_data, Some(&hashed_user.password.unwrap()))
             .unwrap();
         assert!(
             !is_valid,
@@ -301,13 +268,13 @@ mod tests {
     #[test]
     fn test_verify_user_missing_hash_protection() {
         let engine = get_test_engine();
-        let input_data = [77u8; 256];
+        let mut input_data = [7u8; 256];
 
         // Замеряем время, чтобы убедиться, что фейковое хеширование РАБОТАЕТ (нет тайминг-атаки)
         let start = std::time::Instant::now();
 
         // Передаем None вместо хэша (пользователя нет в БД)
-        let is_valid = engine.verify_user(&input_data, None).unwrap();
+        let is_valid = engine.verify_user(&mut input_data, None).unwrap();
 
         let duration = start.elapsed();
 
@@ -329,10 +296,10 @@ mod tests {
     #[test]
     fn test_hash_user_without_password() {
         let engine = get_test_engine();
-        let input_data = [99u8; 256];
+        let mut input_data = [9u8; 256];
 
         // Генерируем только логин (например, для проверки существования или быстрой сверки)
-        let hashed_user = engine.hash_user(&input_data, false).unwrap();
+        let hashed_user = engine.hash_user(&mut input_data, false).unwrap();
 
         assert!(!hashed_user.login.is_empty());
         assert!(
