@@ -3,13 +3,17 @@ use std::sync::OnceLock;
 
 use argon2::PasswordVerifier;
 use hmac::{Hmac, KeyInit, Mac};
-use sha2::Sha512;
+use sha2::{Sha256, Sha512};
 
 use argon2::{Algorithm, Argon2, Params, PasswordHash, Version, password_hash::PasswordHasher};
 
+use rand::seq::SliceRandom;
+use rand_chacha::ChaCha12Rng as ChaChaRng;
+use rand_chacha::rand_core::SeedableRng;
+
 use serde::Deserialize;
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 
 static PEPPER_STORAGE: OnceLock<Vec<u8>> = OnceLock::new();
 
@@ -53,19 +57,53 @@ impl CryptoEngine {
         Ok(Self { argon2, config })
     }
 
-    pub fn split_by_parity(arr: &[u8; 256]) -> ([u8; 128], [u8; 128]) {
-        let mut evens = [0u8; 128];
-        let mut odds = [0u8; 128];
-
-        for i in 0..128 {
-            evens[i] = arr[i * 2];
-            odds[i] = arr[i * 2 + 1];
+    fn pack_nibbles<const I: usize, const O: usize>(arr: &[u8; I]) -> Result<[u8; O], String> {
+        const {
+            assert!(
+                I == O * 2,
+                "Input array must be twice as many elements as output array"
+            );
         }
+        let mut packed = [0u8; O];
+        let mut err = 0u8;
+        for (i, pair) in arr.as_chunks::<2>().0.iter().enumerate() {
+            let first = pair[0];
+            let second = pair[1];
 
-        (evens, odds)
+            err |= (first >> 4) | (second >> 4);
+
+            packed[i] = (first << 4) | (second & 0x0F);
+        }
+        if err != 0 {
+            return Err("Number must be from 0 to 15".to_string());
+        }
+        Ok(packed)
     }
 
-    fn digest_hmac_sha512(&self, arr: &[u8; 128]) -> Result<String> {
+    fn digest_seed(&self, arr: &[u8]) -> Result<[u8; 32]> {
+        type HmacSha256 = Hmac<Sha256>;
+        let mut mac = HmacSha256::new_from_slice(self.config.pepper.as_bytes())?;
+        mac.update(arr.iter().as_slice());
+        let seed = mac.finalize().into_bytes().into();
+        Ok(seed)
+    }
+
+    fn split_array(&self, arr: &mut [u8; 256]) -> Result<([u8; 64], [u8; 64])> {
+        let pack_arr: [u8; 128] = Self::pack_nibbles(arr).map_err(|e| anyhow!(e))?;
+
+        let mut rng = ChaChaRng::from_seed(self.digest_seed(&pack_arr)?);
+        arr.shuffle(&mut rng);
+
+        let first_slice: &[u8; 128] = arr[0..128].try_into()?;
+        let first_packed: [u8; 64] = Self::pack_nibbles(first_slice).map_err(|e| anyhow!(e))?;
+
+        let second_slice: &[u8; 128] = arr[128..256].try_into()?;
+        let second_packed: [u8; 64] = Self::pack_nibbles(second_slice).map_err(|e| anyhow!(e))?;
+
+        Ok((first_packed, second_packed))
+    }
+
+    fn digest_hmac_sha512(&self, arr: &[u8; 64]) -> Result<String> {
         type HmacSha512 = Hmac<Sha512>;
         let mut mac = HmacSha512::new_from_slice(self.config.pepper.as_bytes())?;
         mac.update(arr);
@@ -74,7 +112,7 @@ impl CryptoEngine {
         Ok(result)
     }
 
-    fn digest_argon2id(&self, arr: &[u8; 128]) -> Result<String, argon2::password_hash::Error> {
+    fn digest_argon2id(&self, arr: &[u8; 64]) -> Result<String, argon2::password_hash::Error> {
         let raw_salt = argon2::password_hash::generate_salt();
         let password_hash = self
             .argon2
@@ -84,24 +122,24 @@ impl CryptoEngine {
         Ok(password_hash)
     }
 
-    fn verify_password(&self, arr: &[u8; 128], hash: &str) -> Result<bool> {
+    fn verify_password(&self, arr: &[u8; 64], hash: &str) -> Result<bool> {
         let parsed_hash = PasswordHash::new(hash)?;
         Ok(self.argon2.verify_password(arr, &parsed_hash).is_ok())
     }
 
-    pub fn verify_user(&self, arr: &[u8; 256], password_hash: Option<&str>) -> Result<bool> {
-        let (arr, _) = Self::split_by_parity(arr);
+    pub fn verify_user(&self, arr: &mut [u8; 256], password_hash: Option<&str>) -> Result<bool> {
+        let (arr, _) = self.split_array(arr)?;
         match password_hash {
             Some(hash) => Ok(self.verify_password(&arr, hash)?),
             None => Ok(self.verify_password(&arr, &self.config.trash_argon2)?),
         }
     }
 
-    pub fn hash_user(&self, arr: &[u8; 256], password: bool) -> Result<HashedUser> {
-        let (evens, odds) = Self::split_by_parity(arr);
-        let hash_login = self.digest_hmac_sha512(&odds)?;
+    pub fn hash_user(&self, arr: &mut [u8; 256], password: bool) -> Result<HashedUser> {
+        let (first, second) = self.split_array(arr)?;
+        let hash_login = self.digest_hmac_sha512(&first)?;
         let hash_password = if password {
-            Some(self.digest_argon2id(&evens)?)
+            Some(self.digest_argon2id(&second)?)
         } else {
             None
         };
@@ -138,34 +176,61 @@ mod tests {
         })
     }
 
-    #[test]
-    fn test_split_by_parity_correctness() {
-        // Создаем массив [0, 1, 2, 3, 4, 5, ..., 255]
-        let mut input = [0u8; 256];
+    // Функция генерации валидного массива для тестов.
+    // pack_nibbles обычно ожидает значения от 0 до 15 (полубайты).
+    fn generate_valid_test_array() -> [u8; 256] {
+        let mut arr = [0u8; 256];
+        // Заполняем массив циклически значениями 0..=15
         for i in 0..256 {
-            input[i] = i as u8;
+            arr[i] = (i % 16) as u8;
         }
+        arr
+    }
 
-        let (evens, odds) = CryptoEngine::split_by_parity(&input);
+    #[test]
+    fn test_successful_packing() {
+        // Входной массив из 4 элементов (I = 4)
+        let input: [u8; 4] = [0x0A, 0x0B, 0x05, 0x0C];
 
-        // Проверяем четные индексы: 0, 2, 4... должны превратиться в 0, 2, 4...
-        assert_eq!(evens[0], 0);
-        assert_eq!(evens[1], 2);
-        assert_eq!(evens[127], 254);
+        // Ожидаем на выходе 2 элемента (O = 2), так как 4 == 2 * 2
+        let result = CryptoEngine::pack_nibbles::<4, 2>(&input);
 
-        // Проверяем нечетные индексы: 1, 3, 5... должны превратиться в 1, 3, 5...
-        assert_eq!(odds[0], 1);
-        assert_eq!(odds[1], 3);
-        assert_eq!(odds[127], 255);
+        assert!(result.is_ok());
+        // 0x0A << 4 | 0x0B -> 0xAB
+        // 0x05 << 4 | 0x0C -> 0x5C
+        assert_eq!(result.unwrap(), [0xAB, 0x5C]);
+    }
+
+    #[test]
+    fn test_invalid_nibble_value() {
+        // Число 16 не влезает в 4 бита (полубайт)
+        let input: [u8; 4] = [0x0A, 16, 0x05, 0x0C];
+
+        let result = CryptoEngine::pack_nibbles::<4, 2>(&input);
+
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err(),
+            "Number must be from 0 to 15".to_string()
+        );
+    }
+
+    #[test]
+    fn test_zeros_and_max_values() {
+        let input: [u8; 2] = [0, 15]; // Граничные значения
+        let result = CryptoEngine::pack_nibbles::<2, 1>(&input);
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), [0x0F]);
     }
 
     #[test]
     fn test_hash_and_verify_success() {
         let engine = get_test_engine();
-        let input_data = [42u8; 256]; // Имитируем какой-то ключ/пароль на 256 байт
+        let mut input_data = [4u8; 256]; // Имитируем какой-то ключ/пароль на 256 байт
 
         // Хешируем пользователя (включая пароль)
-        let hashed_user = engine.hash_user(&input_data, true).unwrap();
+        let hashed_user = engine.hash_user(&mut input_data, true).unwrap();
 
         assert!(
             !hashed_user.login.is_empty(),
@@ -184,7 +249,7 @@ mod tests {
 
         // Проверяем верификацию существующего пользователя
         let is_valid = engine
-            .verify_user(&input_data, Some(&pwd_hash_str))
+            .verify_user(&mut input_data, Some(&pwd_hash_str))
             .unwrap();
         assert!(
             is_valid,
@@ -195,15 +260,15 @@ mod tests {
     #[test]
     fn test_verify_user_wrong_password() {
         let engine = get_test_engine();
-        let input_data = [42u8; 256];
-        let mut wrong_data = [42u8; 256];
+        let mut input_data = [15u8; 256];
+        let mut wrong_data = [15u8; 256];
         wrong_data[0] = 0; // Чуть-чуть ломаем входные данные для проверки пароля
 
-        let hashed_user = engine.hash_user(&input_data, true).unwrap();
+        let hashed_user = engine.hash_user(&mut input_data, true).unwrap();
 
         // Передаем измененные данные со старым хэшем
         let is_valid = engine
-            .verify_user(&wrong_data, Some(&hashed_user.password.unwrap()))
+            .verify_user(&mut wrong_data, Some(&hashed_user.password.unwrap()))
             .unwrap();
         assert!(
             !is_valid,
@@ -214,13 +279,13 @@ mod tests {
     #[test]
     fn test_verify_user_missing_hash_protection() {
         let engine = get_test_engine();
-        let input_data = [77u8; 256];
+        let mut input_data = [7u8; 256];
 
         // Замеряем время, чтобы убедиться, что фейковое хеширование РАБОТАЕТ (нет тайминг-атаки)
         let start = std::time::Instant::now();
 
         // Передаем None вместо хэша (пользователя нет в БД)
-        let is_valid = engine.verify_user(&input_data, None).unwrap();
+        let is_valid = engine.verify_user(&mut input_data, None).unwrap();
 
         let duration = start.elapsed();
 
@@ -242,15 +307,103 @@ mod tests {
     #[test]
     fn test_hash_user_without_password() {
         let engine = get_test_engine();
-        let input_data = [99u8; 256];
+        let mut input_data = [9u8; 256];
 
         // Генерируем только логин (например, для проверки существования или быстрой сверки)
-        let hashed_user = engine.hash_user(&input_data, false).unwrap();
+        let hashed_user = engine.hash_user(&mut input_data, false).unwrap();
 
         assert!(!hashed_user.login.is_empty());
         assert!(
             hashed_user.password.is_none(),
             "Если password = false, Argon2 не должен запускаться"
+        );
+    }
+
+    // 1. Тест на успешное выполнение и детерминированность (воспроизводимость)
+    #[test]
+    fn test_split_array_success_and_deterministic() {
+        let engine = get_test_engine();
+
+        let mut input_1 = generate_valid_test_array();
+        let mut input_2 = input_1.clone();
+
+        // Проверяем, что функция успешно отрабатывает
+        let res1 = engine.split_array(&mut input_1);
+        assert!(
+            res1.is_ok(),
+            "split_array returned an error: {:?}",
+            res1.err()
+        );
+
+        let res2 = engine.split_array(&mut input_2);
+        assert!(res2.is_ok());
+
+        let (left1, right1) = res1.unwrap();
+        let (left2, right2) = res2.unwrap();
+
+        // Так как движок один и тот же, сид из digest_seed будет одинаковым.
+        // Результаты перемешивания и разделения должны строго совпадать.
+        assert_eq!(left1, left2, "Left packed arrays do not match");
+        assert_eq!(right1, right2, "Right packed arrays do not match");
+
+        // Проверяем, что исходный массив действительно изменился (перемешался)
+        assert_ne!(
+            input_1,
+            generate_valid_test_array(),
+            "Input array was not mutated/shuffled"
+        );
+    }
+
+    // 2. Тест на корректность перемешивания (сохранение состава данных)
+    #[test]
+    fn test_split_array_preserves_elements() {
+        let engine = get_test_engine();
+        let mut input = generate_valid_test_array();
+
+        // Считаем контрольную сумму элементов до вызова
+        let sum_before: usize = input.iter().map(|&x| x as usize).sum();
+
+        engine.split_array(&mut input).unwrap();
+
+        // Считаем контрольную сумму после вызова
+        let sum_after: usize = input.iter().map(|&x| x as usize).sum();
+
+        // Перемешивание должно изменить порядок, но не сами элементы
+        assert_ne!(
+            input,
+            generate_valid_test_array(),
+            "Array layout did not change"
+        );
+        assert_eq!(
+            sum_before, sum_after,
+            "Elements were lost or corrupted during shuffle"
+        );
+    }
+
+    // 3. Тест на чувствительность к входным данным (разный вход -> разный сид -> разный результат)
+    #[test]
+    fn test_split_array_different_inputs_different_results() {
+        let engine = get_test_engine();
+
+        let mut input_1 = generate_valid_test_array();
+
+        let mut input_2 = generate_valid_test_array();
+        // Слегка меняем второй массив (например, первый элемент),
+        // чтобы pack_nibbles выдал другую упакованную последовательность,
+        // что изменит digest_seed и ChaChaRng сид.
+        input_2[0] = 5;
+
+        let (left1, right1) = engine.split_array(&mut input_1).unwrap();
+        let (left2, right2) = engine.split_array(&mut input_2).unwrap();
+
+        // Результаты разделения должны кардинально отличаться из-за лавинного эффекта хэширования seed
+        assert_ne!(
+            left1, left2,
+            "Outputs should be different for different inputs"
+        );
+        assert_ne!(
+            right1, right2,
+            "Outputs should be different for different inputs"
         );
     }
 }
