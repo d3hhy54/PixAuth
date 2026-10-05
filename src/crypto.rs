@@ -65,13 +65,17 @@ impl CryptoEngine {
             );
         }
         let mut packed = [0u8; O];
+        let mut err = 0u8;
         for (i, pair) in arr.chunks_exact(2).enumerate() {
             let first = pair[0];
             let second = pair[1];
-            if first > 15 || second > 15 {
-                return Err("Number must be from 0 to 15".to_string());
-            }
+
+            err |= (first >> 4) | (second >> 4);
+
             packed[i] = (first << 4) | (second & 0x0F);
+        }
+        if err != 0 {
+            return Err("Number must be from 0 to 15".to_string());
         }
         Ok(packed)
     }
