@@ -66,7 +66,7 @@ impl CryptoEngine {
         }
         let mut packed = [0u8; O];
         let mut err = 0u8;
-        for (i, pair) in arr.chunks_exact(2).enumerate() {
+        for (i, pair) in arr.as_chunks::<2>().0.iter().enumerate() {
             let first = pair[0];
             let second = pair[1];
 
