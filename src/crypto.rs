@@ -154,6 +154,39 @@ impl CryptoEngine {
 mod tests {
     use super::*;
 
+    // Улучшенная версия: не трогает env, а собирает конфиг руками
+    fn get_test_engine() -> &'static CryptoEngine {
+        static ENGINE: OnceLock<CryptoEngine> = OnceLock::new();
+        ENGINE.get_or_init(|| {
+            // Создаем конфигурацию напрямую, без опасных манипуляций с std::env
+            let config = ArgonConfig {
+                m_cost: 4096, // Быстро для тестов
+                t_cost: 2,
+                p_cost: 1,
+                trash_argon2: "$argon2id$v=19$m=4096,t=2,p=1$c29tZXJhbmRvbXNhbHQ$vR4S/zG/q+jP2vI35Z1NfA3k9dJxl6QzU6jX8jL5Zok".to_string(), // Валидный хэш под наши параметры!
+                pepper: "super_secret_test_pepper_that_is_long_enough_for_hmac_and_argon".to_string(),
+            };
+
+            let pepper_vec = PEPPER_STORAGE.get_or_init(|| config.pepper.clone().into_bytes());
+            let leaked_pepper: &'static [u8] = pepper_vec.as_slice();
+            let params = Params::new(config.m_cost, config.t_cost, config.p_cost, None).unwrap();
+            let argon2 = Argon2::new_with_secret(leaked_pepper, Algorithm::Argon2id, Version::V0x13, params).unwrap();
+
+            CryptoEngine { argon2, config }
+        })
+    }
+
+    // Функция генерации валидного массива для тестов.
+    // pack_nibbles обычно ожидает значения от 0 до 15 (полубайты).
+    fn generate_valid_test_array() -> [u8; 256] {
+        let mut arr = [0u8; 256];
+        // Заполняем массив циклически значениями 0..=15
+        for i in 0..256 {
+            arr[i] = (i % 16) as u8;
+        }
+        arr
+    }
+
     #[test]
     fn test_successful_packing() {
         // Входной массив из 4 элементов (I = 4)
@@ -189,28 +222,6 @@ mod tests {
 
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), [0x0F]);
-    }
-
-    // Улучшенная версия: не трогает env, а собирает конфиг руками
-    fn get_test_engine() -> &'static CryptoEngine {
-        static ENGINE: OnceLock<CryptoEngine> = OnceLock::new();
-        ENGINE.get_or_init(|| {
-            // Создаем конфигурацию напрямую, без опасных манипуляций с std::env
-            let config = ArgonConfig {
-                m_cost: 4096, // Быстро для тестов
-                t_cost: 2,
-                p_cost: 1,
-                trash_argon2: "$argon2id$v=19$m=4096,t=2,p=1$c29tZXJhbmRvbXNhbHQ$vR4S/zG/q+jP2vI35Z1NfA3k9dJxl6QzU6jX8jL5Zok".to_string(), // Валидный хэш под наши параметры!
-                pepper: "super_secret_test_pepper_that_is_long_enough_for_hmac_and_argon".to_string(),
-            };
-
-            let pepper_vec = PEPPER_STORAGE.get_or_init(|| config.pepper.clone().into_bytes());
-            let leaked_pepper: &'static [u8] = pepper_vec.as_slice();
-            let params = Params::new(config.m_cost, config.t_cost, config.p_cost, None).unwrap();
-            let argon2 = Argon2::new_with_secret(leaked_pepper, Algorithm::Argon2id, Version::V0x13, params).unwrap();
-
-            CryptoEngine { argon2, config }
-        })
     }
 
     #[test]
@@ -305,6 +316,94 @@ mod tests {
         assert!(
             hashed_user.password.is_none(),
             "Если password = false, Argon2 не должен запускаться"
+        );
+    }
+
+    // 1. Тест на успешное выполнение и детерминированность (воспроизводимость)
+    #[test]
+    fn test_split_array_success_and_deterministic() {
+        let engine = get_test_engine();
+
+        let mut input_1 = generate_valid_test_array();
+        let mut input_2 = input_1.clone();
+
+        // Проверяем, что функция успешно отрабатывает
+        let res1 = engine.split_array(&mut input_1);
+        assert!(
+            res1.is_ok(),
+            "split_array returned an error: {:?}",
+            res1.err()
+        );
+
+        let res2 = engine.split_array(&mut input_2);
+        assert!(res2.is_ok());
+
+        let (left1, right1) = res1.unwrap();
+        let (left2, right2) = res2.unwrap();
+
+        // Так как движок один и тот же, сид из digest_seed будет одинаковым.
+        // Результаты перемешивания и разделения должны строго совпадать.
+        assert_eq!(left1, left2, "Left packed arrays do not match");
+        assert_eq!(right1, right2, "Right packed arrays do not match");
+
+        // Проверяем, что исходный массив действительно изменился (перемешался)
+        assert_ne!(
+            input_1,
+            generate_valid_test_array(),
+            "Input array was not mutated/shuffled"
+        );
+    }
+
+    // 2. Тест на корректность перемешивания (сохранение состава данных)
+    #[test]
+    fn test_split_array_preserves_elements() {
+        let engine = get_test_engine();
+        let mut input = generate_valid_test_array();
+
+        // Считаем контрольную сумму элементов до вызова
+        let sum_before: usize = input.iter().map(|&x| x as usize).sum();
+
+        engine.split_array(&mut input).unwrap();
+
+        // Считаем контрольную сумму после вызова
+        let sum_after: usize = input.iter().map(|&x| x as usize).sum();
+
+        // Перемешивание должно изменить порядок, но не сами элементы
+        assert_ne!(
+            input,
+            generate_valid_test_array(),
+            "Array layout did not change"
+        );
+        assert_eq!(
+            sum_before, sum_after,
+            "Elements were lost or corrupted during shuffle"
+        );
+    }
+
+    // 3. Тест на чувствительность к входным данным (разный вход -> разный сид -> разный результат)
+    #[test]
+    fn test_split_array_different_inputs_different_results() {
+        let engine = get_test_engine();
+
+        let mut input_1 = generate_valid_test_array();
+
+        let mut input_2 = generate_valid_test_array();
+        // Слегка меняем второй массив (например, первый элемент),
+        // чтобы pack_nibbles выдал другую упакованную последовательность,
+        // что изменит digest_seed и ChaChaRng сид.
+        input_2[0] = 5;
+
+        let (left1, right1) = engine.split_array(&mut input_1).unwrap();
+        let (left2, right2) = engine.split_array(&mut input_2).unwrap();
+
+        // Результаты разделения должны кардинально отличаться из-за лавинного эффекта хэширования seed
+        assert_ne!(
+            left1, left2,
+            "Outputs should be different for different inputs"
+        );
+        assert_ne!(
+            right1, right2,
+            "Outputs should be different for different inputs"
         );
     }
 }
